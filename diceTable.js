@@ -1,106 +1,122 @@
-const crypto = require('crypto');
-const readline = require('readline-sync');
 const chalk = require('chalk');
-const Table = require('cli-table3');
 
-const diceSet = [
-  [2, 2, 4, 4, 9, 9],
-  [1, 1, 6, 6, 8, 8],
-  [3, 3, 5, 5, 7, 7],
-];
+const DiceSet = require('./DiceSet');
+const ProbabilityCalculator = require('./ProbabilityCalculator');
+const ProbabilityTablePrinter = require('./ProbabilityTablePrinter');
+const FairRandomGenerator = require('./FairRandomGenerator');
+const InputHandler = require('./InputHandler');
 
-function hmac(key, message) {
-  return crypto.createHmac('sha256', key).update(message).digest('hex');
-}
-
-function generateKey() {
-  return crypto.randomBytes(32).toString('hex');
-}
-
-function getRandomInt(max) {
-  return Math.floor(Math.random() * max);
-}
-
-function commitStep(promptText, valueRange) {
-  let userVal;
-  while (true) {
-    const input = readline.question(chalk.yellow(`${promptText} (0-${valueRange - 1}): `));
-    userVal = parseInt(input);
-    if (!isNaN(userVal) && userVal >= 0 && userVal < valueRange) break;
-    console.log(chalk.red('❌ Invalid input. Please enter a valid number.'));
+class DiceTable {
+  constructor(diceArrays) {
+    this.diceSet = new DiceSet(diceArrays);
+    this.probCalc = new ProbabilityCalculator(this.diceSet);
+    this.tablePrinter = new ProbabilityTablePrinter(this.diceSet, this.probCalc.getProbabilityMatrix());
+    this.fairRandom = new FairRandomGenerator();
+    this.inputHandler = new InputHandler();
   }
 
-  const compVal = getRandomInt(valueRange);
-  const userKey = generateKey();
-  const compKey = generateKey();
-  const userHmac = hmac(userKey, userVal.toString());
-  const compHmac = hmac(compKey, compVal.toString());
+  async generateFairRandomInt(range, promptMsg) {
+    this.fairRandom.generate(range);
+    console.log(`\n🔐 Computer commits to a secret number in range [0-${range - 1}].`);
+    console.log(`HMAC: ${chalk.blue(this.fairRandom.getHmac())}`);
 
-  console.log(`\nYour HMAC: ${chalk.blue(userHmac)}`);
-  console.log(`Computer HMAC: ${chalk.blue(compHmac)}\n`);
-  readline.question(chalk.gray('Press Enter to reveal both choices...'));
+    const userVal = await this.inputHandler.askInt(promptMsg, 0, range - 1);
 
-  console.log(`\n🧑 You chose: ${chalk.green(userVal)}`);
-  console.log(`   Key: ${chalk.gray(userKey)}\n   HMAC: ${hmac(userKey, userVal.toString())}`);
+    console.log(`\n💻 Computer's number: ${chalk.red(this.fairRandom.value)}`);
+    console.log(`🔑 Secret key: ${chalk.gray(this.fairRandom.getKeyHex())}`);
+    console.log(`✅ Recomputed HMAC: ${chalk.green(this.fairRandom.verify() ? 'valid' : 'invalid')}`);
 
-  console.log(`💻 Computer chose: ${chalk.red(compVal)}`);
-  console.log(`   Key: ${chalk.gray(compKey)}\n   HMAC: ${hmac(compKey, compVal.toString())}`);
+    const finalVal = (userVal + this.fairRandom.value) % range;
+    console.log(`🎯 Final result: (${userVal} + ${this.fairRandom.value}) % ${range} = ${chalk.green(finalVal)}\n`);
 
-  console.log(chalk.gray('\n🔍 You can verify the HMAC using any online tool or the hmac() function.\n'));
+    return finalVal;
+  }
 
-  return { userVal, compVal };
-}
+  async chooseDice(player, disallowedIndex = null) {
+    let promptMsg = `${player}, select your die index (0-${this.diceSet.size() - 1}) or 'X' to exit, '?' for help: `;
 
-function getRoll(die, index) {
-  return die[index % die.length];
-}
+    while (true) {
+      const idx = await this.generateFairRandomInt(this.diceSet.size(), promptMsg);
 
-function printProbabilityTable() {
-  console.log(chalk.bold('\n🎲 Dice Win Probability Table'));
-  const table = new Table({
-    head: ['User \\ Comp', '2,2,4,4,9,9', '1,1,6,6,8,8', '3,3,5,5,7,7'],
-    style: { head: ['green'], border: ['gray'] },
-    colAligns: ['left', 'center', 'center', 'center'],
-  });
-
-  diceSet.forEach((userDie, i) => {
-    const row = [diceSet[i].join(',')];
-    diceSet.forEach((compDie, j) => {
-      if (i === j) {
-        row.push('-');
-      } else {
-        let wins = 0;
-        for (let u of userDie) for (let c of compDie) if (u > c) wins++;
-        row.push((wins / 36).toFixed(2));
+      if (idx === disallowedIndex) {
+        console.log(chalk.yellow(`❌ You cannot select the dice already chosen by the other player (#${disallowedIndex}). Please select a different dice.`));
+        continue;
       }
-    });
-    table.push(row);
-  });
-  console.log(table.toString());
+
+      console.log(`${player} selected die #${idx}: [${this.diceSet.getDice(idx).toString()}]`);
+      return idx;
+    }
+  }
+
+  async rollDie(player, dieIndex) {
+    const dieSize = this.diceSet.getDice(dieIndex).getAllFaces().length;
+    const promptMsg = `${player}, enter a number (0-${dieSize - 1}) to roll your die, or 'X' to exit, '?' for help: `;
+
+    console.log(chalk.bold(`\n🎲 ${player}'s roll:`));
+    const rollIndex = await this.generateFairRandomInt(dieSize, promptMsg);
+    const faceValue = this.diceSet.getDice(dieIndex).getFace(rollIndex);
+    console.log(`${player} rolled: ${chalk.green(faceValue)} (Face index: ${rollIndex})`);
+    return faceValue;
+  }
+
+  async play() {
+    console.log(chalk.bold('\n🎮 Welcome to the Fair Non-Transitive Dice Game!'));
+
+    this.tablePrinter.print();
+
+    console.log(chalk.bold('\n🎲 Deciding who picks first...'));
+    const first = await this.generateFairRandomInt(2, 'Enter your number (0-1) or X to exit, ? for help: ');
+
+    let userDieIndex, compDieIndex;
+
+    if (first === 0) {
+      console.log(chalk.green('🧑 You go first!'));
+      userDieIndex = await this.chooseDice('You');
+      compDieIndex = await this.chooseDice('Computer', userDieIndex);
+    } else {
+      console.log(chalk.red('💻 Computer goes first!'));
+      compDieIndex = await this.chooseDice('Computer');
+      userDieIndex = await this.chooseDice('You', compDieIndex);
+    }
+
+    const userRoll = await this.rollDie('You', userDieIndex);
+    const compRoll = await this.rollDie('Computer', compDieIndex);
+
+    if (userRoll > compRoll) {
+      console.log(chalk.green('\n✅ You win!'));
+    } else if (userRoll < compRoll) {
+      console.log(chalk.red('\n❌ Computer wins!'));
+    } else {
+      console.log(chalk.yellow('\n⚖️ It\'s a draw!'));
+    }
+  }
 }
 
-function playGame() {
-  printProbabilityTable();
+module.exports = DiceTable;
 
-  const { userVal: userDieIndex, compVal: compDieIndex } = commitStep('Choose your die', 3);
-  const userDie = diceSet[userDieIndex];
-  const compDie = diceSet[compDieIndex];
+if (require.main === module) {
+  (async () => {
+    try {
+      const diceArgs = process.argv.slice(2).map(str =>
+        str.split(',').map(n => parseInt(n.trim(), 10))
+      );
 
-  console.log(`\nYour Die: [${chalk.green(userDie.join(', '))}]`);
-  console.log(`Computer Die: [${chalk.red(compDie.join(', '))}]\n`);
+      if (diceArgs.length < 3) {
+        console.error('❌ Error: Please provide at least 3 dice as 6 comma-separated integers each.');
+        process.exit(1);
+      }
 
-  const { userVal: userRollIndex, compVal: compRollIndex } = commitStep('Select your roll index', 6);
-  const { userVal: finalUserRollIndex, compVal: finalCompRollIndex } = commitStep('Computer rolls (choose number to blend)', 6);
+      for (const die of diceArgs) {
+        if (die.length !== 6 || die.some(n => Number.isNaN(n))) {
+          console.error('❌ Error: Each die must contain exactly 6 integers.');
+          process.exit(1);
+        }
+      }
 
-  const userRoll = getRoll(userDie, userRollIndex + finalUserRollIndex);
-  const compRoll = getRoll(compDie, compRollIndex + finalCompRollIndex);
-
-  console.log(`\n🎲 You rolled: ${chalk.green(userRoll)} (from Die ${userDieIndex})`);
-  console.log(`🎲 Computer rolled: ${chalk.red(compRoll)} (from Die ${compDieIndex})`);
-
-  if (userRoll > compRoll) console.log(chalk.green('\n✅ You win!'));
-  else if (userRoll < compRoll) console.log(chalk.red('\n❌ Computer wins!'));
-  else console.log(chalk.yellow("\n⚖️ It's a draw!"));
+      const game = new DiceTable(diceArgs);
+      await game.play();
+    } catch (err) {
+      console.error(`❌ Unexpected error: ${err.message}`);
+    }
+  })();
 }
-
-playGame();
